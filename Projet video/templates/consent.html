@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <title>CONDITIONS D'UTILISATION</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body class="cv-body">
+  <div class="container">
+    <h1 class="title">CONDITIONS D'UTILISATION</h1>
+
+    <div class="card">
+      <p>
+        Cette interface est un banc d’essai (benchmark) visant à comparer les performances
+        de modèles de vision par ordinateur : <strong>YOLO</strong> (détection d’objets),
+        <strong>ResNet</strong> (détection simplifiée) et <strong>ResNet Places365</strong>
+        (classification de scène).
+      </p>
+      <p>
+        En utilisant l’application, <strong>votre caméra sera activée</strong>.
+        Votre image sera <strong>filmée en temps réel</strong> et <strong>analysée</strong>.
+        Les objets et/ou la scène pourront être détectés et classifiés. Les métriques suivantes
+        pourront être <strong>collectées et conservées</strong> dans le but exclusif
+        d’évaluer les performances des modèles :
+      </p>
+      <ul>
+        <li>Temps de traitement / latence par image</li>
+        <li>Fréquence d’images traitées (FPS)</li>
+        <li>Objets ou scènes détectés</li>
+      </ul>
+      <p>
+        Ces données servent à <strong>choisir le modèle le plus performant</strong> dans votre contexte.
+        Aucune donnée n’est partagée avec des tiers. Vous pouvez interrompre l’analyse à tout moment.
+      </p>
+
+      <form method="POST" class="consent-form">
+        <label class="checkbox">
+          <input type="checkbox" id="accept_terms" name="accept_terms">
+          <span>J’ai lu et j’accepte les conditions d’utilisation</span>
+        </label>
+
+        <button id="continue_btn" class="btn btn-primary" disabled>Continuer</button>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    const checkbox = document.getElementById('accept_terms');
+    const btn = document.getElementById('continue_btn');
+    checkbox.addEventListener('change', () => {
+      btn.disabled = !checkbox.checked;
+    });
+  </script>
+</body>
+</html>

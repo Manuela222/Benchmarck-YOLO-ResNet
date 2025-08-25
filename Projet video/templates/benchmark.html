@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <title>BENCHMARK DE YOLO, RESNET ET DÉTECTION HUMAINE</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    /* Superposition vidéo + canvas pour l’onglet humain */
+    .stack{ position:relative; width:100%; height:auto; }
+    .stack video, .stack canvas{ width:100%; height:auto; display:block; border-radius:12px; }
+    .stack canvas{ position:absolute; left:0; top:0; pointer-events:none; }
+  </style>
+</head>
+<body class="cv-body">
+  <div class="container">
+    <h1 class="title center">BENCHMARK DE YOLO, RESNET ET DÉTECTION HUMAINE</h1>
+
+    <!-- Onglets -->
+    <div class="tabs">
+      <button class="tab-btn active" data-tab="detection">Détection d’objets</button>
+      <button class="tab-btn" data-tab="scene">Classification de scène</button>
+      <button class="tab-btn" data-tab="human">Détection humaine</button>
+    </div>
+
+    <!-- ======== Détection d'objets ======== -->
+    <section id="tab-detection" class="tab-content active">
+      <div class="controls">
+        <label for="modelSelect">Modèle :</label>
+        <select id="modelSelect">
+          <option value="" disabled selected>Choisir…</option>
+          <option value="yolo">YOLO</option>
+          <option value="resnet">ResNet (ImageNet)</option>
+        </select>
+        <button id="det-start" class="btn btn-primary" disabled>Commencer</button>
+        <button id="det-stop" class="btn btn-secondary" disabled>Arrêter</button>
+        <button id="det-download" class="btn" disabled>Télécharger résultats</button>
+      </div>
+
+      <div class="grid">
+        <div class="panel">
+          <video id="det-video" autoplay playsinline muted class="video"></video>
+        </div>
+        <div class="panel">
+          <h3>Objets détectés</h3>
+          <ul id="det-objects" class="list"></ul>
+          <h3 style="margin-top:16px;">Métriques (latence / FPS)</h3>
+          <canvas id="metricsChart"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== Classification de scène ======== -->
+    <section id="tab-scene" class="tab-content">
+      <div class="controls">
+        <button id="sc-start" class="btn btn-primary">Commencer</button>
+        <button id="sc-stop" class="btn btn-secondary" disabled>Arrêter</button>
+        <button id="sc-download" class="btn" disabled>Télécharger résultats</button>
+      </div>
+
+      <div class="grid">
+        <div class="panel">
+          <video id="sc-video" autoplay playsinline muted class="video"></video>
+        </div>
+        <div class="panel">
+          <h3>Scène détectée</h3>
+          <div id="sc-scene" class="scene-box">–</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======== Détection humaine ======== -->
+    <section id="tab-human" class="tab-content">
+      <div class="controls">
+        <label for="humanModel">Modèle :</label>
+        <select id="humanModel">
+          <option value="" disabled selected>Choisir…</option>
+          <option value="yolov8-pose">YOLOv8 Pose</option>
+          <option value="fasterrcnn">Faster R-CNN ResNet50 (COCO person)</option>
+        </select>
+        <button id="human-start" class="btn btn-primary" disabled>Commencer</button>
+        <button id="human-stop" class="btn btn-secondary" disabled>Arrêter</button>
+        <button id="human-download" class="btn" disabled>Télécharger résultats</button>
+      </div>
+
+      <div class="grid">
+        <div class="panel">
+          <div class="stack">
+            <video id="human-video" autoplay playsinline muted class="video"></video>
+            <canvas id="human-canvas"></canvas>
+          </div>
+        </div>
+        <div class="panel">
+          <h3>Métriques (latence / FPS)</h3>
+          <canvas id="humanChart"></canvas>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Injection des labels Places365 depuis Flask (pour scène) -->
+  <script>
+    const PLACES_LABELS = {{ places_labels | tojson | safe }};
+  </script>
+
+  <script>
+    // ---------- Gestion onglets ----------
+    const tabButtons = document.querySelectorAll('.tab-btn');
+    const tabContents = document.querySelectorAll('.tab-content');
+    tabButtons.forEach(btn => {
+      btn.addEventListener('click', () => {
+        tabButtons.forEach(b => b.classList.remove('active'));
+        tabContents.forEach(c => c.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+      });
+    });
+
+    // ---------- Utilitaires ----------
+    async function getStream(videoEl) {
+      if (videoEl.srcObject) return videoEl.srcObject;
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+      videoEl.srcObject = stream;
+      await videoEl.play();
+      return stream;
+    }
+    function stopStream(videoEl) {
+      const s = videoEl.srcObject;
+      if (s) s.getTracks().forEach(t => t.stop());
+      videoEl.srcObject = null;
+    }
+    function frameToDataURL(videoEl) {
+      const c = document.createElement('canvas');
+      c.width = videoEl.videoWidth || 640;
+      c.height = videoEl.videoHeight || 480;
+      const ctx = c.getContext('2d');
+      ctx.drawImage(videoEl, 0, 0, c.width, c.height);
+      return c.toDataURL('image/png');
+    }
+    function downloadCSV(filename, rows) {
+      const header = Object.keys(rows[0] || {time:"",latency_ms:"",fps:"",model:"",mode:"",result:""}).join(',');
+      const body = rows.map(r => Object.values(r).map(v => `"${String(v).replaceAll('"','""')}"`).join(',')).join('\n');
+      const csv = header + '\n' + body;
+      const blob = new Blob([csv], {type: 'text/csv;charset=utf-8;'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = filename; a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // ==========================
+    // Détection d'objets (YOLO / ResNet)
+    // ==========================
+    const detVideo = document.getElementById('det-video');
+    const detStart = document.getElementById('det-start');
+    const detStop = document.getElementById('det-stop');
+    const detDownload = document.getElementById('det-download');
+    const modelSelect = document.getElementById('modelSelect');
+    const detList = document.getElementById('det-objects');
+
+    let detTimer = null;
+    let detModel = null;
+    let detRows = [];
+    let lastTimestamp = null;
+
+    const metricsCtx = document.getElementById('metricsChart');
+    const metricsData = {
+      labels: [],
+      datasets: [
+        { label: 'Latence (ms)', data: [], yAxisID: 'y' },
+        { label: 'FPS', data: [], yAxisID: 'y1' }
+      ]
+    };
+    const metricsChart = new Chart(metricsCtx, {
+      type: 'line',
+      data: metricsData,
+      options: {
+        responsive: true,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          y: { type: 'linear', position: 'left', title: {display: true, text: 'ms'} },
+          y1: { type: 'linear', position: 'right', title: {display: true, text: 'fps'}, grid: { drawOnChartArea: false } }
+        }
+      }
+    });
+
+    modelSelect.addEventListener('change', async () => {
+      detModel = modelSelect.value;
+      detStart.disabled = !detModel;
+      detDownload.disabled = true;
+      await getStream(detVideo);
+    });
+
+    detStart.addEventListener('click', async () => {
+      if (!detModel) return;
+      detStart.disabled = true;
+      detStop.disabled = false;
+      detDownload.disabled = true;
+      detRows = [];
+      metricsData.labels = [];
+      metricsData.datasets[0].data = [];
+      metricsData.datasets[1].data = [];
+      metricsChart.update();
+
+      await getStream(detVideo);
+      lastTimestamp = performance.now();
+
+      detTimer = setInterval(async () => {
+        try {
+          const dataURL = frameToDataURL(detVideo);
+          const res = await fetch('/api/detect', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ image: dataURL, model: detModel })
+          });
+          const json = await res.json();
+          if (!json.ok) return;
+
+          const now = performance.now();
+          const dt = (now - lastTimestamp) / 1000.0;
+          lastTimestamp = now;
+          const fps = dt > 0 ? (1.0/dt) : 0;
+
+          detList.innerHTML = '';
+          (json.objects || []).forEach(o => {
+            const li = document.createElement('li'); li.textContent = o; detList.appendChild(li);
+          });
+
+          const label = new Date().toLocaleTimeString();
+          metricsData.labels.push(label);
+          metricsData.datasets[0].data.push(json.latency_ms || 0);
+          metricsData.datasets[1].data.push(Number(fps.toFixed(2)));
+          if (metricsData.labels.length > 60) {
+            metricsData.labels.shift();
+            metricsData.datasets.forEach(d => d.data.shift());
+          }
+          metricsChart.update();
+
+          detRows.push({
+            time: new Date().toISOString(),
+            latency_ms: json.latency_ms || 0,
+            fps: fps.toFixed(2),
+            model: detModel,
+            mode: "detection",
+            result: (json.objects || []).join('|')
+          });
+        } catch(e) { console.error(e); }
+      }, 250);
+    });
+
+    detStop.addEventListener('click', () => {
+      detStart.disabled = false;
+      detStop.disabled = true;
+      detDownload.disabled = detRows.length === 0;
+      clearInterval(detTimer); detTimer = null;
+      stopStream(detVideo);
+    });
+
+    detDownload.addEventListener('click', () => {
+      if (detRows.length) downloadCSV('benchmark_detection.csv', detRows);
+    });
+
+    // ==========================
+    // Classification de scène (Places365)
+    // ==========================
+    const scVideo = document.getElementById('sc-video');
+    const scStart = document.getElementById('sc-start');
+    const scStop = document.getElementById('sc-stop');
+    const scDownload = document.getElementById('sc-download');
+    const scScene = document.getElementById('sc-scene');
+
+    let scTimer = null;
+    let scRows = [];
+    let scLastTs = null;
+
+    scStart.addEventListener('click', async () => {
+      scStart.disabled = true;
+      scStop.disabled = false;
+      scDownload.disabled = true;
+      scRows = [];
+      await getStream(scVideo);
+      scLastTs = performance.now();
+
+      scTimer = setInterval(async () => {
+        try {
+          const dataURL = frameToDataURL(scVideo);
+          const res = await fetch('/api/scene', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ image: dataURL })
+          });
+          const json = await res.json();
+          if (!json.ok) {
+            scScene.textContent = json.error || 'Erreur';
+            return;
+          }
+
+          const now = performance.now();
+          const dt = (now - scLastTs) / 1000.0;
+          scLastTs = now;
+          const fps = dt > 0 ? (1.0/dt) : 0;
+
+          // mapping robuste vers un label texte
+          function sceneToLabel(j) {
+            if (typeof j.scene === 'string' && j.scene.trim() !== '' && isNaN(Number(j.scene))) {
+              return j.scene.trim();
+            }
+            const idxFromScene = (typeof j.scene === 'number') ? j.scene : Number(j.scene);
+            if (Number.isInteger(idxFromScene) && PLACES_LABELS[idxFromScene]) {
+              return PLACES_LABELS[idxFromScene];
+            }
+            if (typeof j.cls_id === 'number' && PLACES_LABELS[j.cls_id]) {
+              return PLACES_LABELS[j.cls_id];
+            }
+            return 'Inconnu';
+          }
+          const label = sceneToLabel(json);
+          scScene.textContent = label;
+
+          scRows.push({
+            time: new Date().toISOString(),
+            latency_ms: json.latency_ms || 0,
+            fps: fps.toFixed(2),
+            model: "resnet_places365",
+            mode: "scene",
+            result: label
+          });
+        } catch(e) { console.error(e); }
+      }, 300);
+    });
+
+    scStop.addEventListener('click', () => {
+      scStart.disabled = false;
+      scStop.disabled = true;
+      scDownload.disabled = scRows.length === 0;
+      clearInterval(scTimer); scTimer = null;
+      stopStream(scVideo);
+    });
+
+    scDownload.addEventListener('click', () => {
+      if (scRows.length) downloadCSV('benchmark_scene.csv', scRows);
+    });
+
+    // ==========================
+    // Détection humaine (YOLOv8 Pose / Faster R-CNN)
+    // ==========================
+    const humanVideo = document.getElementById('human-video');
+    const humanCanvas = document.getElementById('human-canvas');
+    const humanModel = document.getElementById('humanModel');
+    const humanStart = document.getElementById('human-start');
+    const humanStop = document.getElementById('human-stop');
+    const humanDownload = document.getElementById('human-download');
+
+    let humanTimer = null;
+    let humanRows = [];
+    let humanLastTs = null;
+    let humanChoice = null;
+
+    // Graphe pour l’onglet humain
+    const humanChartCtx = document.getElementById('humanChart');
+    const humanData = {
+      labels: [],
+      datasets: [
+        { label: 'Latence (ms)', data: [], yAxisID: 'y' },
+        { label: 'FPS', data: [], yAxisID: 'y1' }
+      ]
+    };
+    const humanChart = new Chart(humanChartCtx, {
+      type: 'line',
+      data: humanData,
+      options: {
+        responsive: true,
+        animation: false,
+        interaction: { mode: 'index', intersect: false },
+        scales: {
+          y:  { type: 'linear', position: 'left',  title: {display: true, text: 'ms'} },
+          y1: { type: 'linear', position: 'right', title: {display: true, text: 'fps'}, grid: { drawOnChartArea: false } }
+        }
+      }
+    });
+
+    humanModel.addEventListener('change', async () => {
+      humanChoice = humanModel.value; // 'yolov8-pose' | 'fasterrcnn'
+      humanStart.disabled = !humanChoice;
+      humanDownload.disabled = true;
+      await getStream(humanVideo);
+      // dimensionner le canvas sur la vidéo
+      requestAnimationFrame(() => {
+        humanCanvas.width = humanVideo.videoWidth || 640;
+        humanCanvas.height = humanVideo.videoHeight || 480;
+      });
+    });
+
+    function drawHumanOverlay(resp) {
+      const ctx = humanCanvas.getContext('2d');
+      ctx.clearRect(0, 0, humanCanvas.width, humanCanvas.height);
+
+      // Dessin boîte
+      function drawBox(b) {
+        if (!b) return;
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#00FF00';
+        ctx.strokeRect(b[0], b[1], b[2]-b[0], b[3]-b[1]);
+      }
+
+      // Edges COCO (17 points) pour YOLOv8 Pose
+      const edges = [
+        [5,7],[7,9],
+        [6,8],[8,10],
+        [11,13],[13,15],
+        [12,14],[14,16],
+        [5,6],[11,12],[5,11],[6,12],
+        [0,1],[1,2],[2,3],[3,4],[1,5],[1,6]
+      ];
+
+      if (resp.model === 'yolov8-pose') {
+        (resp.persons || []).forEach(p => {
+          drawBox(p.bbox);
+          const kps = p.keypoints || [];
+          // points
+          ctx.fillStyle = '#FF0000';
+          kps.forEach(k => {
+            const [x,y] = k;
+            if (x==null || y==null) return;
+            ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI*2); ctx.fill();
+          });
+          // segments
+          ctx.strokeStyle = '#00FFFF';
+          ctx.lineWidth = 2;
+          edges.forEach(([a,b]) => {
+            const ka = kps[a], kb = kps[b];
+            if (!ka || !kb) return;
+            const [xa,ya] = ka, [xb,yb] = kb;
+            if (xa==null || ya==null || xb==null || yb==null) return;
+            ctx.beginPath(); ctx.moveTo(xa,ya); ctx.lineTo(xb,yb); ctx.stroke();
+          });
+        });
+      } else {
+        // Faster R-CNN -> boîtes uniquement
+        (resp.persons || []).forEach(p => drawBox(p.bbox));
+      }
+    }
+
+    humanStart.addEventListener('click', async () => {
+      if (!humanChoice) return;
+      humanStart.disabled = true;
+      humanStop.disabled = false;
+      humanDownload.disabled = true;
+      humanRows = [];
+      humanData.labels = [];
+      humanData.datasets[0].data = [];
+      humanData.datasets[1].data = [];
+      humanChart.update();
+
+      await getStream(humanVideo);
+      humanCanvas.width  = humanVideo.videoWidth || 640;
+      humanCanvas.height = humanVideo.videoHeight || 480;
+
+      humanLastTs = performance.now();
+
+      humanTimer = setInterval(async () => {
+        try {
+          const dataURL = frameToDataURL(humanVideo);
+          const res = await fetch('/api/human', {
+            method: 'POST',
+            headers: {'Content-Type':'application/json'},
+            body: JSON.stringify({ image: dataURL, model: humanChoice })
+          });
+          const json = await res.json();
+          if (!json.ok) return;
+
+          // Overlay squelettes/boîtes
+          drawHumanOverlay(json);
+
+          const now = performance.now();
+          const dt = (now - humanLastTs) / 1000.0;
+          humanLastTs = now;
+          const fps = dt > 0 ? (1.0/dt) : 0;
+
+          // Graphe
+          const tlabel = new Date().toLocaleTimeString();
+          humanData.labels.push(tlabel);
+          humanData.datasets[0].data.push(json.latency_ms || 0);
+          humanData.datasets[1].data.push(Number(fps.toFixed(2)));
+          if (humanData.labels.length > 60) {
+            humanData.labels.shift();
+            humanData.datasets.forEach(d => d.data.shift());
+          }
+          humanChart.update();
+
+          // CSV
+          humanRows.push({
+            time: new Date().toISOString(),
+            latency_ms: json.latency_ms || 0,
+            fps: fps.toFixed(2),
+            model: humanChoice,
+            mode: "human",
+            result: (json.persons || []).length + " persons"
+          });
+        } catch (e) { console.error(e); }
+      }, 300);
+    });
+
+    humanStop.addEventListener('click', () => {
+      humanStart.disabled = false;
+      humanStop.disabled = true;
+      humanDownload.disabled = humanRows.length === 0;
+      clearInterval(humanTimer); humanTimer = null;
+      const ctx = humanCanvas.getContext('2d');
+      ctx.clearRect(0,0,humanCanvas.width,humanCanvas.height);
+      stopStream(humanVideo);
+    });
+
+    humanDownload.addEventListener('click', () => {
+      if (humanRows.length) downloadCSV('benchmark_human.csv', humanRows);
+    });
+  </script>
+</body>
+</html>
