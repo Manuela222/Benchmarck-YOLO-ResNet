@@ -129,4 +129,4 @@ Ce projet est un **outil expérimental** destiné à l’évaluation et à l’a
 
 ## Apercu
 
-![alt text](image.png)
+![alt text](image-1.png)
