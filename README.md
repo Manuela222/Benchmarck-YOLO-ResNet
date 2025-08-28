@@ -1,4 +1,4 @@
-# Projet Video – Benchmark YOLO, ResNet & Détection Humaine  
+# Projet Video – Benchmark de YOLO et ResNet pour la détection d'objets, de scènes et d'humain  
 
 ## Description  
 Ce projet est une application **Flask** qui permet de comparer en temps réel les performances de plusieurs modèles de vision par ordinateur :  
